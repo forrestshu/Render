@@ -18,14 +18,18 @@ export async function GET(request: NextRequest): Promise<Response> {
 
     const API_KEY = process.env.GEMINI_API_KEY || '';
     const MODEL = process.env.GEMINI_MODEL || 'gemini-3-pro-image-preview';
-    const proxyUrl =
-      process.env.HTTPS_PROXY ||
-      process.env.HTTP_PROXY ||
-      process.env.https_proxy ||
-      process.env.http_proxy;
+    // 注意：在 Vercel 生产环境中不使用代理，只在本地开发时使用
+    const isVercel = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
+    const proxyUrl = isVercel
+      ? undefined  // Vercel 上不使用代理
+      : (process.env.HTTPS_PROXY ||
+         process.env.HTTP_PROXY ||
+         process.env.https_proxy ||
+         process.env.http_proxy);
 
     log(`API Key: ${API_KEY ? `${API_KEY.substring(0, 15)}...` : '未设置'}`);
     log(`模型: ${MODEL}`);
+    log(`环境: ${isVercel ? 'Vercel (不使用代理)' : '本地开发'}`);
     log(`代理: ${proxyUrl || '未设置'}`);
 
     if (!API_KEY) {
@@ -44,9 +48,9 @@ export async function GET(request: NextRequest): Promise<Response> {
 
     const urlObj = new URL(apiUrl);
 
-    const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
+    const agent = (proxyUrl && !isVercel) ? new HttpsProxyAgent(proxyUrl) : undefined;
     if (agent) log(`✅ 使用代理: ${proxyUrl!.replace(/:[^:@]*@/, ':****@')}`);
-    else log('⚠️  未配置代理 - 直接连接');
+    else log(isVercel ? '✅ Vercel 环境 - 直接连接（不使用代理）' : '⚠️  未配置代理 - 直接连接');
 
     const { statusCode, statusMessage, body } = await new Promise<{
       statusCode: number;

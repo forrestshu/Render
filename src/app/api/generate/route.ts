@@ -36,17 +36,22 @@ function makeHttpsRequest(url: string, options: any, data: string): Promise<{ st
     const urlObj = new URL(url);
     
     // Get proxy from environment variables
-    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || 
-                     process.env.https_proxy || process.env.http_proxy;
+    // 注意：在 Vercel 生产环境中不使用代理，只在本地开发时使用
+    const isVercel = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
+    const proxyUrl = isVercel 
+      ? undefined  // Vercel 上不使用代理
+      : (process.env.HTTPS_PROXY || process.env.HTTP_PROXY || 
+         process.env.https_proxy || process.env.http_proxy);
     
     console.log('Proxy check:', {
+      isVercel,
       HTTPS_PROXY: process.env.HTTPS_PROXY ? 'Set' : 'Not set',
       HTTP_PROXY: process.env.HTTP_PROXY ? 'Set' : 'Not set',
       proxyUrl: proxyUrl || 'Not set'
     });
     
     let agent: any = undefined;
-    if (proxyUrl) {
+    if (proxyUrl && !isVercel) {
       try {
         const { HttpsProxyAgent } = require('https-proxy-agent');
         agent = new HttpsProxyAgent(proxyUrl);
@@ -55,7 +60,7 @@ function makeHttpsRequest(url: string, options: any, data: string): Promise<{ st
         console.warn('❌ Failed to create proxy agent:', e);
       }
     } else {
-      console.warn('⚠️  No proxy configured - direct connection');
+      console.log(isVercel ? '✅ Vercel environment - direct connection (no proxy)' : '⚠️  No proxy configured - direct connection');
     }
     
     const requestOptions: any = {
