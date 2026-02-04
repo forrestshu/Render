@@ -1,17 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import https from 'https';
 import { URL } from 'url';
-import { HttpsProxyAgent } from 'https-proxy-agent';
 import fs from 'fs';
 import path from 'path';
 
 // Google Gemini API configuration
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const MODEL =
-  process.env.GEMINI_MODEL || 'gemini-3-pro-image-preview';
-
-const GEMINI_API_URL =
-  `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+// 注意：在 Vercel 上，环境变量需要在运行时读取，而不是在模块加载时
+const getGeminiConfig = () => {
+  const apiKey = process.env.GEMINI_API_KEY || '';
+  const model = process.env.GEMINI_MODEL || 'gemini-3-pro-image-preview';
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  return { apiKey, model, apiUrl };
+};
   
 // Style prompts for architecture rendering
 const STYLE_PROMPTS: Record<string, string> = {
@@ -53,11 +53,13 @@ function makeHttpsRequest(url: string, options: any, data: string): Promise<{ st
     let agent: any = undefined;
     if (proxyUrl && !isVercel) {
       try {
+        // 仅在本地开发时动态加载代理
         const { HttpsProxyAgent } = require('https-proxy-agent');
         agent = new HttpsProxyAgent(proxyUrl);
         console.log('✅ Using proxy:', proxyUrl.replace(/:[^:@]*@/, ':****@')); // Hide password
       } catch (e) {
         console.warn('❌ Failed to create proxy agent:', e);
+        // 如果代理创建失败，继续使用直接连接
       }
     } else {
       console.log(isVercel ? '✅ Vercel environment - direct connection (no proxy)' : '⚠️  No proxy configured - direct connection');
@@ -161,8 +163,12 @@ function makeHttpsRequest(url: string, options: any, data: string): Promise<{ st
 export async function POST(request: NextRequest) {
   const startTime = Date.now();
   try {
+    // 在运行时读取环境变量（确保在 Vercel 上正确获取）
+    const { apiKey: GEMINI_API_KEY, model: MODEL, apiUrl: GEMINI_API_URL } = getGeminiConfig();
+    
     console.log('=== Generate API Called ===');
     console.log('Timestamp:', new Date().toISOString());
+    console.log('Environment:', process.env.VERCEL ? 'Vercel' : 'Local');
     console.log('GEMINI_API_KEY exists:', !!GEMINI_API_KEY);
     console.log('GEMINI_API_KEY length:', GEMINI_API_KEY.length);
     console.log('MODEL:', MODEL);
@@ -267,7 +273,8 @@ export async function POST(request: NextRequest) {
         const apiCallStartTime = Date.now();
         console.log(`调用 Gemini API (尝试 ${attempt + 1}/${maxRetries + 1})...`);
         console.log('API call start time:', new Date().toISOString());
-        const apiUrl = GEMINI_API_URL;
+        // 重新获取配置以确保使用最新的环境变量
+        const { apiUrl } = getGeminiConfig();
         apiResponse = await makeHttpsRequest(apiUrl, {
           method: 'POST',
           headers: {
@@ -315,34 +322,49 @@ export async function POST(request: NextRequest) {
     // 如果所有重试都失败
     if (!apiResponse) {
       const fetchError = lastError;
+      // 记录详细错误信息用于调试
+      console.error('=== API 调用失败详情 ===');
+      console.error('Error object:', JSON.stringify({
+        message: fetchError?.message,
+        code: fetchError?.code,
+        errno: fetchError?.errno,
+        syscall: fetchError?.syscall,
+        stack: fetchError?.stack
+      }, null, 2));
+      
       // 提供更详细的错误信息
       let errorDetails = `网络错误: ${fetchError?.message || '未知错误'}`;
       let errorTitle = '无法连接到 Gemini API';
       
       if (fetchError?.message?.includes('ENOTFOUND') || fetchError?.message?.includes('getaddrinfo')) {
-        errorDetails = 'DNS 解析失败，无法连接到 Google API 服务器。';
+        errorDetails = 'DNS 解析失败，无法连接到 Google API 服务器。Vercel 服务器可能无法访问 Google API。';
         errorTitle = 'DNS 解析失败';
       } else if (fetchError?.message?.includes('ECONNREFUSED') || fetchError?.code === 'ECONNREFUSED') {
-        errorDetails = '连接被拒绝。可能是防火墙或代理设置问题。';
+        errorDetails = '连接被拒绝。可能是防火墙或网络限制问题。';
         errorTitle = '连接被拒绝';
       } else if (fetchError?.message?.includes('ETIMEDOUT') || fetchError?.code === 'ETIMEDOUT' || fetchError?.message?.includes('timeout')) {
-        errorDetails = '连接超时。无法访问 Google API 服务器。如果您在中国大陆，可能需要配置代理。';
+        errorDetails = '连接超时。Vercel 服务器无法在120秒内连接到 Google API 服务器。';
         errorTitle = '连接超时';
       } else if (fetchError?.message?.includes('certificate') || fetchError?.message?.includes('SSL')) {
         errorDetails = 'SSL 证书验证失败。请检查系统时间是否正确。';
         errorTitle = 'SSL 证书错误';
       } else if (fetchError?.code === 'ENOTFOUND' || fetchError?.errno === 'ENOTFOUND') {
-        errorDetails = '无法解析域名。请检查网络连接或 DNS 设置。如果您在中国大陆，可能需要配置代理。';
+        errorDetails = '无法解析域名 generativelanguage.googleapis.com。Vercel 服务器可能无法访问 Google API。';
         errorTitle = '域名解析失败';
       } else if (fetchError?.message?.includes('socket hang up') || fetchError?.code === 'ECONNRESET') {
-        errorDetails = '连接被意外关闭（socket hang up）。可能是代理连接不稳定、网络中断或请求过大。已重试多次，请稍后重试。';
+        errorDetails = '连接被意外关闭（socket hang up）。可能是网络中断或请求过大。已重试多次。';
         errorTitle = '连接中断';
       }
       
       return NextResponse.json(
         { 
           error: errorTitle, 
-          details: `${errorDetails}\n\n解决方案：\n1. 检查网络连接\n2. 如果您在中国大陆，需要配置代理（VPN）\n3. 检查防火墙设置\n4. 确认 API Key 是否正确\n\n配置代理：如果使用代理，请在环境变量中设置 HTTP_PROXY 和 HTTPS_PROXY`
+          details: `${errorDetails}\n\n错误代码: ${fetchError?.code || 'N/A'}\n错误信息: ${fetchError?.message || 'N/A'}\n\n请检查 Vercel 函数日志获取更多详细信息。`,
+          debug: {
+            errorCode: fetchError?.code,
+            errorMessage: fetchError?.message,
+            errorName: fetchError?.name
+          }
         },
         { status: 503 }
       );
@@ -383,23 +405,28 @@ export async function POST(request: NextRequest) {
     // 记录到控制台（开发环境）
     console.log('📊 Token Usage:', JSON.stringify(tokenUsage, null, 2));
     
-    // 记录到日志文件
-    const logDir = path.join(process.cwd(), 'logs');
-    const logFile = path.join(logDir, 'token-usage.log');
-    
-    try {
-      // 确保日志目录存在
-      if (!fs.existsSync(logDir)) {
-        fs.mkdirSync(logDir, { recursive: true });
+    // 记录到日志文件（仅在非 Vercel 环境）
+    const isVercel = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
+    if (!isVercel) {
+      try {
+        const logDir = path.join(process.cwd(), 'logs');
+        const logFile = path.join(logDir, 'token-usage.log');
+        
+        // 确保日志目录存在
+        if (!fs.existsSync(logDir)) {
+          fs.mkdirSync(logDir, { recursive: true });
+        }
+        
+        // 追加日志到文件（JSON Lines 格式，每行一个 JSON 对象）
+        const logEntry = JSON.stringify(tokenUsage) + '\n';
+        fs.appendFileSync(logFile, logEntry, 'utf8');
+        console.log(`✅ Token usage logged to: ${logFile}`);
+      } catch (logError) {
+        console.error('❌ Failed to write token usage log:', logError);
+        // 即使日志写入失败，也不影响主流程
       }
-      
-      // 追加日志到文件（JSON Lines 格式，每行一个 JSON 对象）
-      const logEntry = JSON.stringify(tokenUsage) + '\n';
-      fs.appendFileSync(logFile, logEntry, 'utf8');
-      console.log(`✅ Token usage logged to: ${logFile}`);
-    } catch (logError) {
-      console.error('❌ Failed to write token usage log:', logError);
-      // 即使日志写入失败，也不影响主流程
+    } else {
+      console.log('ℹ️  Vercel environment - skipping file log write');
     }
     
     // Extract image from Gemini response

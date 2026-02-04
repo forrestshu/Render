@@ -6,6 +6,51 @@ import ImageUploader from '@/components/ImageUploader';
 import ImagePreview from '@/components/ImagePreview';
 import RenderingControls, { RenderingSettings } from '@/components/RenderingControls';
 import ImageModal from '@/components/ImageModal';
+import { captureEvent } from '@/lib/posthog';
+
+// Vercel 请求体约 4.5MB 限制，base64 图片预留约 3.5MB 以免超限
+const MAX_IMAGE_BASE64_LENGTH = 3.5 * 1024 * 1024;
+const MAX_DIMENSION = 1200;
+const JPEG_QUALITY = 0.82;
+
+function compressImageIfNeeded(dataUrl: string): Promise<string> {
+  if (dataUrl.length <= MAX_IMAGE_BASE64_LENGTH) return Promise.resolve(dataUrl);
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      let w = img.width;
+      let h = img.height;
+      if (w > MAX_DIMENSION || h > MAX_DIMENSION) {
+        if (w > h) {
+          h = Math.round((h * MAX_DIMENSION) / w);
+          w = MAX_DIMENSION;
+        } else {
+          w = Math.round((w * MAX_DIMENSION) / h);
+          h = MAX_DIMENSION;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, w, h);
+      let quality = JPEG_QUALITY;
+      let result = canvas.toDataURL('image/jpeg', quality);
+      while (result.length > MAX_IMAGE_BASE64_LENGTH && quality > 0.3) {
+        quality -= 0.1;
+        result = canvas.toDataURL('image/jpeg', quality);
+      }
+      resolve(result);
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
 
 // 建筑风格选项（从 RenderingControls 中提取）
 const STYLES = [
@@ -29,12 +74,21 @@ export default function Home() {
     setUploadedImage({ file, preview });
     setGeneratedImage(null);
     setError(null);
+    
+    // 追踪图片上传事件
+    captureEvent('image_uploaded', {
+      file_type: file.type,
+      file_size: file.size,
+    });
   };
 
   const handleRemoveImage = () => {
     setUploadedImage(null);
     setGeneratedImage(null);
     setError(null);
+    
+    // 追踪图片移除事件
+    captureEvent('image_removed');
   };
 
   const handleGenerate = async (settings: RenderingSettings) => {
@@ -42,6 +96,14 @@ export default function Home() {
 
     setIsGenerating(true);
     setError(null);
+
+    // 追踪生成请求事件
+    captureEvent('generate_rendering_started', {
+      style: settings.style,
+      strength: settings.strength,
+      has_custom_prompt: !!settings.prompt,
+      prompt_length: settings.prompt?.length || 0,
+    });
 
     console.log('🚀 开始生成渲染图...', {
       hasImage: !!uploadedImage,
@@ -63,13 +125,14 @@ export default function Home() {
       try {
         const requestStartTime = Date.now();
         console.log('📤 发送 API 请求...');
+        const imageToSend = await compressImageIfNeeded(uploadedImage.preview);
         response = await fetch('/api/generate', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            image: uploadedImage.preview,
+            image: imageToSend,
             style: settings.style,
             prompt: settings.prompt,
             strength: settings.strength,
@@ -92,7 +155,16 @@ export default function Home() {
         throw fetchError;
       }
 
-      const data = await response.json();
+      let data: { result?: string; error?: string; details?: string; usage?: { totalTokens?: number } };
+      try {
+        data = await response.json();
+      } catch {
+        const text = await response.text();
+        if (response.status === 413 || /request entity too large/i.test(text)) {
+          throw new Error('图片或请求体过大（超过平台限制）。请上传更小的图片或使用更短的描述后再试。');
+        }
+        throw new Error(text || `服务器返回了无效响应 (${response.status})`);
+      }
 
       if (!response.ok) {
         const errorMessage = data.error || data.details || 'Failed to generate rendering';
@@ -103,11 +175,29 @@ export default function Home() {
       // 确保返回的是渲染后的图片，而不是原图
       if (data.result && data.result !== uploadedImage.preview) {
         setGeneratedImage(data.result);
+        
+        // 追踪生成成功事件
+        captureEvent('generate_rendering_success', {
+          style: settings.style,
+          strength: settings.strength,
+          has_custom_prompt: !!settings.prompt,
+          usage_tokens: data.usage?.totalTokens || 0,
+        });
       } else {
         throw new Error('API 返回了原始图片。请检查您的 API Key 配置。');
       }
     } catch (err) {
       console.error('生成渲染图错误:', err);
+      
+      // 追踪生成失败事件
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      captureEvent('generate_rendering_failed', {
+        style: settings.style,
+        strength: settings.strength,
+        error_type: err instanceof Error ? err.name : 'Unknown',
+        error_message: errorMessage.substring(0, 200), // 限制长度
+      });
+      
       if (err instanceof Error) {
         if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
           setError('网络连接失败。请检查网络连接或稍后重试。\n\n如果问题持续，可能是服务器响应超时。');
@@ -133,6 +223,11 @@ export default function Home() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    
+    // 追踪下载事件
+    captureEvent('image_downloaded', {
+      has_generated_image: !!generatedImage,
+    });
   };
 
   return (
@@ -182,7 +277,14 @@ export default function Home() {
                   <button
                     key={s.id}
                     type="button"
-                    onClick={() => setSelectedStyle(s.id)}
+                    onClick={() => {
+                      setSelectedStyle(s.id);
+                      // 追踪风格选择事件
+                      captureEvent('style_selected', {
+                        style: s.id,
+                        style_name: s.name,
+                      });
+                    }}
                     className={`p-0.5 rounded border-2 text-center transition-all ${
                       selectedStyle === s.id
                         ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30'
@@ -227,7 +329,13 @@ export default function Home() {
                 {generatedImage && (
                   <div className="flex items-center gap-1.5">
                     <button
-                      onClick={() => setIsModalOpen(true)}
+                      onClick={() => {
+                        setIsModalOpen(true);
+                        // 追踪预览事件
+                        captureEvent('image_preview_opened', {
+                          image_type: 'generated',
+                        });
+                      }}
                       className="flex items-center gap-1 px-2 py-1 text-[10px] bg-gray-500 hover:bg-gray-600 text-white rounded transition-colors"
                       title="预览放大"
                     >
@@ -251,7 +359,13 @@ export default function Home() {
               
               <div className="relative flex-1 w-full bg-gray-50 dark:bg-gray-900 overflow-hidden">
                 {generatedImage ? (
-                  <div className="relative w-full h-full cursor-pointer" onClick={() => setIsModalOpen(true)}>
+                  <div className="relative w-full h-full cursor-pointer" onClick={() => {
+                    setIsModalOpen(true);
+                    // 追踪图片点击预览事件
+                    captureEvent('image_clicked_to_preview', {
+                      image_type: 'generated',
+                    });
+                  }}>
                     <img
                       src={generatedImage}
                       alt="Generated rendering"

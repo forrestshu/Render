@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { captureEvent } from '@/lib/posthog';
 
 interface RenderingControlsProps {
   onGenerate: (settings: RenderingSettings) => void;
@@ -57,7 +58,14 @@ export default function RenderingControls({ onGenerate, isGenerating, disabled, 
               <button
                 key={s.id}
                 type="button"
-                onClick={() => setStyle(s.id)}
+                onClick={() => {
+                  setStyle(s.id);
+                  // 追踪风格选择事件
+                  captureEvent('style_selected', {
+                    style: s.id,
+                    style_name: s.name,
+                  });
+                }}
                 className={`p-2.5 rounded-lg border-2 text-left transition-all ${
                   style === s.id
                     ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30'
@@ -98,7 +106,18 @@ export default function RenderingControls({ onGenerate, isGenerating, disabled, 
             max="1"
             step="0.05"
             value={strength}
-            onChange={(e) => setStrength(parseFloat(e.target.value))}
+            onChange={(e) => {
+              const newStrength = parseFloat(e.target.value);
+              setStrength(newStrength);
+              // 追踪强度调整事件（使用防抖，避免过于频繁）
+              clearTimeout((window as any).strengthChangeTimeout);
+              (window as any).strengthChangeTimeout = setTimeout(() => {
+                captureEvent('strength_adjusted', {
+                  strength: newStrength,
+                  strength_percentage: Math.round(newStrength * 100),
+                });
+              }, 500); // 500ms 防抖
+            }}
             className="w-full h-2 bg-gray-200 dark:bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-500"
           />
           <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">

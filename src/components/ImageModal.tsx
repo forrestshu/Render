@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { captureEvent } from '@/lib/posthog';
 
 interface ImageModalProps {
   src: string;
@@ -13,8 +14,12 @@ export default function ImageModal({ src, alt, isOpen, onClose }: ImageModalProp
   useEffect(() => {
     if (isOpen) {
       document.body.style.overflow = 'hidden';
+      // 追踪模态框打开事件
+      captureEvent('image_modal_opened');
     } else {
       document.body.style.overflow = 'unset';
+      // 追踪模态框关闭事件
+      captureEvent('image_modal_closed');
     }
     return () => {
       document.body.style.overflow = 'unset';
